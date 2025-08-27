@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Rentz — Local MP (4 oameni, fără boți, rotație alegere)</title>
+  <title>Rentz — Local MP (4 oameni, fără boți, rotație alegere) — FIX</title>
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
     #top{position:fixed;left:8px;right:8px;top:8px;display:flex;gap:8px;align-items:center;z-index:5}
@@ -21,7 +21,7 @@
     <label>Seat
       <select id="seat"><option>0</option><option>1</option><option>2</option><option>3</option></select>
     </label>
-    <label>Nume <input id="pname" value="Jucător" size="10"/></label>
+    <label>Nume <input id="pname" value="Player" size="10"/></label>
     <button id="reload">Load game</button>
     <a href="index.html" class="ghost" style="text-decoration:none;padding:8px 12px;border-radius:10px">Open index.html</a>
     <div id="status" style="margin-left:auto;color:#9ca3af">Idle</div>
@@ -33,10 +33,18 @@
     const $ = sel => document.querySelector(sel);
     const room = $('#room'); const seatSel = $('#seat'); const pname = $('#pname'); const status = $('#status'); const frame = $('#frame');
 
+    // Persist user inputs so refresh nu cere rescrierea numelui
+    room.value = localStorage.getItem('rentz_local_room') || 'proba';
+    seatSel.value = localStorage.getItem('rentz_local_seat') || '0';
+    pname.value = localStorage.getItem('rentz_local_name') || 'Player';
+
+    const mySeat = ()=> parseInt(seatSel.value||'0',10)||0;
+    const myName = ()=> (pname.value||'').trim() || ('Player '+(mySeat()+1));
+
     const load = () => {
       const r = room.value.trim() || 'proba';
-      const s = parseInt(seatSel.value||'0',10) || 0;
-      const nm = pname.value.trim() || ('Player '+(s+1));
+      const s = mySeat();
+      const nm = myName();
       localStorage.setItem('rentz_local_room', r);
       localStorage.setItem('rentz_local_seat', String(s));
       localStorage.setItem('rentz_local_name', nm);
@@ -44,34 +52,29 @@
       status.textContent = 'Loading game…';
     };
     $('#reload').addEventListener('click', load);
-    room.value = localStorage.getItem('rentz_local_room') || 'proba';
-    seatSel.value = localStorage.getItem('rentz_local_seat') || '0';
-    pname.value = localStorage.getItem('rentz_local_name') || 'Player';
 
     const channelName = () => 'rentz_'+(room.value.trim()||'proba');
     let chan = new BroadcastChannel(channelName());
     let clientId = (Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,10);
-    let pendingSnapshot = null;
-    let chooser = 0; // cine alege tipul de joc; pornește cu seat 0
-
-    const mySeat = ()=> parseInt(seatSel.value||'0',10)||0;
-    const myName = ()=> pname.value.trim() || ('Player '+(mySeat()+1));
+    let pending = null;
+    let chooser = 0;
 
     room.addEventListener('change', ()=>{ try{chan.close();}catch(e){}; chan = new BroadcastChannel(channelName()); bindChan(); });
 
-    function markLocalOnlyHuman(win){
+    function ensureLocalSeatVisible(win){
       try{
         const s = mySeat();
         if(Array.isArray(win.__state?.players)){
-          win.__state.players.forEach((p,i)=>{ p.isHuman = (i===s); p.isBot=false; });
+          win.__state.players.forEach((p,i)=>{ p.isHuman = (i===s); p.isBot = false; });
+          // Asigurăm numele local indiferent de ce vine în snapshot
+          if(win.__state.players[s]) win.__state.players[s].name = myName();
         }
       }catch(e){}
     }
 
     function applyNames(win, names){
       try{
-        if(!Array.isArray(names)) return;
-        if(Array.isArray(win.__state?.players)){
+        if(Array.isArray(names) && Array.isArray(win.__state?.players)){
           for(let i=0;i<4;i++){ if(names[i]) win.__state.players[i].name = names[i]; }
         }
       }catch(e){}
@@ -79,17 +82,16 @@
 
     function collectNames(win){
       try{
-        if(Array.isArray(win.__state?.players)){ return win.__state.players.map(p=> p.name || ''); }
-      }catch(e){}
-      return [];
+        return Array.isArray(win.__state?.players) ? win.__state.players.map(p=> p.name||'') : [];
+      }catch(e){ return []; }
     }
 
-    function tryApplySnapshot(win, payload){
+    function tryApply(win, payload){
+      if(!win || !win.renderHands) return false;
       try{
-        if(!win || !win.renderHands) return false;
         win.__state = payload.state;
-        if(payload.names) applyNames(win, payload.names);
-        markLocalOnlyHuman(win);
+        applyNames(win, payload.names||[]);
+        ensureLocalSeatVisible(win);
         win.renderHands();
         chooser = (payload.chooser|0)||0;
         status.textContent = 'Snapshot applied ✓ (chooser='+chooser+')';
@@ -103,13 +105,9 @@
     }
 
     function applyOrQueue(payload){
-      const win = frame.contentWindow;
-      if(!win){ pendingSnapshot = payload; return; }
-      if(!tryApplySnapshot(win, payload)){
-        pendingSnapshot = payload;
-      }else{
-        pendingSnapshot = null;
-      }
+      const w = frame.contentWindow;
+      if(!w){ pending = payload; return; }
+      if(!tryApply(w, payload)){ pending = payload; } else { pending = null; }
     }
 
     function bindChan(){
@@ -118,38 +116,41 @@
         if(d.sender===clientId) return;
         const w = frame.contentWindow;
         if(d.type==='START'){ applyOrQueue(d); }
-        if(d.type==='PLAY'){
-          try{ if(w){ w.__mp_fromRemote=true; w.playCard(d.i, d.card); w.__mp_fromRemote=false; } }catch(e){}
-        }
+        if(d.type==='NAMESYNC'){ try{ if(w){ applyNames(w, d.names); w.renderHands && w.renderHands(); } }catch(e){} }
         if(d.type==='CHOOSE'){
           try{
             if(w){
               chooser = (d.nextChooser|0)||((chooser+1)%4);
-              w.__mp_fromRemote=true;
+              w.__mp_fromRemote = true;
               w.__choose(d.name);
-              w.__mp_fromRemote=false;
+              w.__mp_fromRemote = false;
             }
           }catch(e){}
         }
-        if(d.type==='NAMESYNC'){
-          try{ if(w){ applyNames(w, d.names); w.renderHands && w.renderHands(); } }catch(e){}
+        if(d.type==='PLAY'){
+          try{
+            if(w){
+              w.__mp_fromRemote = true;
+              w.playCard(d.i, d.card);
+              w.__mp_fromRemote = false;
+            }
+          }catch(e){}
         }
       };
     }
     bindChan();
 
-    function injectWrappers(){
+    function inject(){
       try{
         const w = frame.contentWindow;
         const s = mySeat();
 
-        // START: host trimite snapshot+names+chooser
+        // START: host difuzează snapshot + nume + chooser; clienții inițializează UI și așteaptă snapshot
         const origStart = w.__start;
         if(typeof origStart==='function'){
           w.__start = function(){
             const r = origStart.apply(this, arguments);
-            try{ if(w.__state && w.__state.players[s]) w.__state.players[s].name = myName(); }catch(e){}
-            markLocalOnlyHuman(w);
+            ensureLocalSeatVisible(w);
             if(s===0){
               chooser = 0;
               setTimeout(()=>{
@@ -164,29 +165,47 @@
                 }
               }, 400);
             }else{
+              // client: anunță-ți numele pentru consolidare
               status.textContent = 'Waiting for host snapshot…';
               status.className = 'warn';
-              try{ chan.postMessage({type:'NAMESYNC', namesHint:{seat:s, name: myName()}, sender:clientId}); }catch(e){}
+              try{
+                const hint = { seat: s, name: myName() };
+                chan.postMessage({type:'NAMESYNC_HINT', hint, sender:clientId});
+              }catch(e){}
             }
             return r;
           };
         }
 
-        // PLAY: doar local turn & local seat, sau remote
+        // Host: ascultă numele și rebroadcast lista completă
+        chan.onmessage = (ev)=>{
+          const d = ev.data||{}; if(d.sender===clientId) return;
+          if(s===0 && d.type==='NAMESYNC_HINT' && d.hint){
+            try{
+              const list = collectNames(w);
+              const seat = d.hint.seat|0; const nm = (d.hint.name||'').toString();
+              if(list[seat] !== nm){
+                list[seat] = nm;
+                chan.postMessage({type:'NAMESYNC', names:list, sender:clientId});
+              }
+            }catch(e){}
+          }
+        };
+
+        // PLAY: permite click DOAR de la seat-ul local (nu mai verificăm explicit "turn"; jocul decide)
         const origPlay = w.playCard;
         if(typeof origPlay==='function'){
           w.playCard = function(i, card){
-            const localTurn = (w.__state && w.__state.turn===s);
             if(w.__mp_fromRemote){ return origPlay.apply(this, arguments); }
-            if(i===s && localTurn){
+            if(i===s){
               try{ chan.postMessage({type:'PLAY', i, card, sender:clientId}); }catch(e){}
               return origPlay.apply(this, arguments);
             }
-            return; // ignora altele
+            return;
           };
         }
 
-        // CHOOSE: doar seat==chooser are voie local; după alegere -> broadcast + nextChooser
+        // CHOOSE: doar "chooser" local poate confirma, apoi broadcast -> toți aplică, nextChooser
         const origChoose = w.__choose;
         if(typeof origChoose==='function'){
           w.__choose = function(name){
@@ -198,11 +217,11 @@
               try{ chan.postMessage({type:'CHOOSE', name, nextChooser: next, sender:clientId}); }catch(e){}
               return res;
             }
-            return; // nu e rândul tău să alegi
+            return;
           };
         }
 
-        if(pendingSnapshot){ tryApplySnapshot(w, pendingSnapshot); pendingSnapshot=null; }
+        if(pending){ tryApply(w, pending); pending = null; }
 
         status.textContent = 'Injected ✓ (seat '+s+', chooser='+chooser+')';
         status.className = '';
@@ -212,8 +231,11 @@
       }
     }
 
-    frame.addEventListener('load', ()=> setTimeout(injectWrappers, 250));
-    load();
+    frame.addEventListener('load', ()=> setTimeout(inject, 250));
+    // load imediat
+    (function initial(){ const r = room.value.trim()||'proba'; const s = mySeat(); const nm = myName();
+      frame.src = 'index.html?seat='+s+'&name='+encodeURIComponent(nm);
+    })();
   })();
   </script>
 </body>
