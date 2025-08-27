@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Rentz — Local MP (4 oameni, fără boți, rotație alegere) — FIX</title>
+  <title>Rentz — Local MP (4 oameni, fără boți, rotație) — v4</title>
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
     #top{position:fixed;left:8px;right:8px;top:8px;display:flex;gap:8px;align-items:center;z-index:5}
@@ -33,7 +33,7 @@
     const $ = sel => document.querySelector(sel);
     const room = $('#room'); const seatSel = $('#seat'); const pname = $('#pname'); const status = $('#status'); const frame = $('#frame');
 
-    // Persist user inputs so refresh nu cere rescrierea numelui
+    // Persist inputs
     room.value = localStorage.getItem('rentz_local_room') || 'proba';
     seatSel.value = localStorage.getItem('rentz_local_seat') || '0';
     pname.value = localStorage.getItem('rentz_local_name') || 'Player';
@@ -65,10 +65,25 @@
       try{
         const s = mySeat();
         if(Array.isArray(win.__state?.players)){
-          win.__state.players.forEach((p,i)=>{ p.isHuman = (i===s); p.isBot = false; });
-          // Asigurăm numele local indiferent de ce vine în snapshot
+          win.__state.players.forEach((p,i)=>{ p.isHuman = (i===s); p.isBot=false; });
           if(win.__state.players[s]) win.__state.players[s].name = myName();
         }
+      }catch(e){}
+    }
+
+    // Find "Alege jocul" modal and disable clicks (guard) when nu e rândul tău să alegi
+    function guardChooseOverlay(win, enabled){
+      try{
+        const doc = win.document;
+        const modals = Array.from(doc.querySelectorAll('div,section,dialog')).filter(el=>/(alege jocul|rentz & trick-taking|rentz)/i.test(el.textContent||''));
+        modals.forEach(el=>{ el.style.pointerEvents = enabled ? 'auto' : 'none'; el.style.opacity = enabled ? '' : '0.85'; });
+      }catch(e){}
+    }
+    function closeChooseOverlay(win){
+      try{
+        const doc = win.document;
+        const modals = Array.from(doc.querySelectorAll('div,section,dialog')).filter(el=>/(alege jocul|rentz & trick-taking|rentz)/i.test(el.textContent||''));
+        modals.forEach(el=> el.style.display='none');
       }catch(e){}
     }
 
@@ -94,6 +109,8 @@
         ensureLocalSeatVisible(win);
         win.renderHands();
         chooser = (payload.chooser|0)||0;
+        // enable/disable modal click depending on chooser
+        guardChooseOverlay(win, mySeat()===chooser);
         status.textContent = 'Snapshot applied ✓ (chooser='+chooser+')';
         status.className = 'ok';
         return true;
@@ -121,9 +138,11 @@
           try{
             if(w){
               chooser = (d.nextChooser|0)||((chooser+1)%4);
+              guardChooseOverlay(w, mySeat()===chooser);
               w.__mp_fromRemote = true;
               w.__choose(d.name);
               w.__mp_fromRemote = false;
+              closeChooseOverlay(w);
             }
           }catch(e){}
         }
@@ -145,12 +164,14 @@
         const w = frame.contentWindow;
         const s = mySeat();
 
-        // START: host difuzează snapshot + nume + chooser; clienții inițializează UI și așteaptă snapshot
+        // START
         const origStart = w.__start;
         if(typeof origStart==='function'){
           w.__start = function(){
             const r = origStart.apply(this, arguments);
             ensureLocalSeatVisible(w);
+            // Modal guard at init: only chooser can click
+            guardChooseOverlay(w, s===chooser);
             if(s===0){
               chooser = 0;
               setTimeout(()=>{
@@ -163,9 +184,8 @@
                   status.textContent = 'Broadcast error';
                   status.className = 'err';
                 }
-              }, 400);
+              }, 350);
             }else{
-              // client: anunță-ți numele pentru consolidare
               status.textContent = 'Waiting for host snapshot…';
               status.className = 'warn';
               try{
@@ -177,7 +197,7 @@
           };
         }
 
-        // Host: ascultă numele și rebroadcast lista completă
+        // Host: consolidate names
         chan.onmessage = (ev)=>{
           const d = ev.data||{}; if(d.sender===clientId) return;
           if(s===0 && d.type==='NAMESYNC_HINT' && d.hint){
@@ -192,7 +212,6 @@
           }
         };
 
-        // PLAY: permite click DOAR de la seat-ul local (nu mai verificăm explicit "turn"; jocul decide)
         const origPlay = w.playCard;
         if(typeof origPlay==='function'){
           w.playCard = function(i, card){
@@ -205,7 +224,6 @@
           };
         }
 
-        // CHOOSE: doar "chooser" local poate confirma, apoi broadcast -> toți aplică, nextChooser
         const origChoose = w.__choose;
         if(typeof origChoose==='function'){
           w.__choose = function(name){
@@ -217,7 +235,7 @@
               try{ chan.postMessage({type:'CHOOSE', name, nextChooser: next, sender:clientId}); }catch(e){}
               return res;
             }
-            return;
+            return; // not your turn to choose
           };
         }
 
@@ -232,7 +250,7 @@
     }
 
     frame.addEventListener('load', ()=> setTimeout(inject, 250));
-    // load imediat
+    // initial load
     (function initial(){ const r = room.value.trim()||'proba'; const s = mySeat(); const nm = myName();
       frame.src = 'index.html?seat='+s+'&name='+encodeURIComponent(nm);
     })();
