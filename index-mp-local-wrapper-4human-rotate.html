@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Rentz — Local MP (4 oameni, rotație) — v6</title>
+  <title>Rentz — Local MP (4 oameni, rotație) — v7</title>
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
     #top{position:fixed;left:8px;right:8px;top:8px;display:flex;gap:8px;align-items:center;z-index:5}
     input,select{background:#0b0b0b;border:1px solid #222;color:#fff;border-radius:10px;padding:8px 10px}
-    button{background:#3b82f6;border:0;color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer;border-radius:10px}
+    button{background:#3b82f6;border:0;color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer}
     #frame{position:absolute;inset:0;top:56px;border:0;width:100%;height:calc(100% - 56px)}
     .ghost{background:#1f2937}
     label{font-size:12px;color:#9ca3af;display:flex;gap:6px;align-items:center}
@@ -69,14 +69,12 @@
         if(Array.isArray(win.__state?.players)){
           win.__state.players.forEach((p,i)=>{ p.isHuman = (i===s); p.isBot=false; });
           if(win.__state.players[s]) win.__state.players[s].name = myName();
-          // dacă există câmpuri tipice, setează starea ca „în joc”
           if(win.__state.gameStarted !== undefined) win.__state.gameStarted = true;
           if(win.__state.phase && /lobby|start/i.test(win.__state.phase)) win.__state.phase = 'playing';
         }
       }catch(e){}
     }
 
-    // close any lobby modal or overlay
     function closeLobby(win){
       try{
         const doc = win.document;
@@ -194,31 +192,33 @@
       try{
         const w = frame.contentWindow;
         const s = mySeat();
+        const nm = myName();
         amHost = (s===0);
 
-        // START patch
+        // START patch: host auto-join imediat
         const origStart = w.__start;
         if(typeof origStart==='function'){
           w.__start = function(){
             const r = origStart.apply(this, arguments);
+            // forțează intrarea în joc imediat pentru host
             makePlayable(w);
             if(amHost){
               chooser = 0;
-              // burst snapshot
+              // dublu-pass: trimite snapshot acum + în burst
+              sendSnapshot(w, 'host immediate');
               let count = 0;
               const t = setInterval(()=>{
                 sendSnapshot(w, 'burst '+(++count));
                 if(count>=5) clearInterval(t);
-              }, 300);
+              }, 250);
               status.textContent = 'Dealt & broadcast ✓';
               status.className = 'ok';
             }else{
               status.textContent = 'Waiting for host snapshot…';
               status.className = 'warn';
-              // semnal că e pregătit + nume
-              const sData = { seat:s, name: myName() };
+              // READY ping + nume
               chan.postMessage({type:'READY', sender:clientId, seat:s});
-              chan.postMessage({type:'NAMESYNC_HINT', hint:sData, sender:clientId});
+              chan.postMessage({type:'NAMESYNC_HINT', hint:{seat:s, name:nm}, sender:clientId});
             }
             return r;
           };
@@ -230,9 +230,9 @@
           if(amHost && d.type==='NAMESYNC_HINT' && d.hint){
             try{
               const list = collectNames(w);
-              const seat = d.hint.seat|0; const nm = (d.hint.name||'').toString();
-              if(list[seat] !== nm){
-                list[seat] = nm;
+              const seat = d.hint.seat|0; const nmx = (d.hint.name||'').toString();
+              if(list[seat] != nmx){
+                list[seat] = nmx;
                 chan.postMessage({type:'NAMESYNC', names:list, sender:clientId});
               }
             }catch(e){}
@@ -273,7 +273,7 @@
         status.textContent = 'Injected ✓ (seat '+s+', chooser='+chooser+', host='+amHost+')';
         status.className = '';
 
-        // Clienții care intră după start cer snapshot periodic până primesc
+        // Clienții cer snapshot periodic până îl primesc
         if(!amHost){
           let tries = 0;
           const rq = setInterval(()=>{
