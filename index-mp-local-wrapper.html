@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Rentz — Local Multiplayer Wrapper</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+    #top{position:fixed;left:12px;right:12px;top:12px;display:flex;gap:8px;align-items:center;z-index:5}
+    input,select{background:#0b0b0b;border:1px solid #222;color:#fff;border-radius:10px;padding:8px 10px}
+    button{background:#3b82f6;border:0;color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer}
+    #frame{position:absolute;inset:0;top:56px;border:0;width:100%;height:calc(100% - 56px)}
+    .ghost{background:#1f2937}
+    label{font-size:12px;color:#9ca3af;display:flex;gap:6px;align-items:center}
+  </style>
+</head>
+<body>
+  <div id="top">
+    <label>Room <input id="room" value="proba"/></label>
+    <label>Seat
+      <select id="seat"><option>0</option><option>1</option><option>2</option><option>3</option></select>
+    </label>
+    <button id="reload">Load game</button>
+    <a href="index.html" class="ghost" style="text-decoration:none;padding:8px 12px;border-radius:10px">Open index.html</a>
+    <div id="status" style="margin-left:auto;color:#9ca3af">Idle</div>
+  </div>
+  <iframe id="frame" src="index.html"></iframe>
+
+  <script>
+  (function(){
+    const $ = sel => document.querySelector(sel);
+    const room = $('#room'); const seatSel = $('#seat'); const status = $('#status'); const frame = $('#frame');
+    const load = () => {
+      const r = room.value.trim() || 'proba';
+      const s = parseInt(seatSel.value||'0',10) || 0;
+      localStorage.setItem('rentz_local_room', r);
+      localStorage.setItem('rentz_local_seat', String(s));
+      frame.src = 'index.html?seat='+s; // seat optional if your game reads it
+    };
+    $('#reload').addEventListener('click', load);
+    // restore
+    room.value = localStorage.getItem('rentz_local_room') || 'proba';
+    seatSel.value = localStorage.getItem('rentz_local_seat') || '0';
+
+    const channelName = () => 'rentz_'+(room.value.trim()||'proba');
+    let chan = new BroadcastChannel(channelName());
+    let clientId = (Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,10);
+
+    // re-open channel when room changes
+    room.addEventListener('change', ()=>{ try{chan.close();}catch(e){}; chan = new BroadcastChannel(channelName()); bindChan(); });
+
+    function bindChan(){
+      chan.onmessage = (ev)=>{
+        const d = ev.data||{};
+        if(d.sender===clientId) return;
+        const w = frame.contentWindow;
+        if(!w) return;
+        if(d.type==='START'){ try{ w.__state = d.state; w.renderHands && w.renderHands(); }catch(e){} }
+        if(d.type==='PLAY'){ try{ w.playCard(d.i, d.card); }catch(e){} }
+        if(d.type==='CHOOSE'){ try{ w.__choose(d.name); }catch(e){} }
+      };
+    }
+    bindChan();
+
+    function injectWrappers(){
+      try{
+        const w = frame.contentWindow;
+        // mark all as human for 4P
+        if(Array.isArray(w.__state?.players)){
+          w.__state.players.forEach((p,i)=>{ p.isHuman=true; if(!p.name) p.name='P'+(i+1); });
+        }
+        const s = parseInt(seatSel.value||'0',10) || 0;
+        const origPlay = w.playCard;
+        if(typeof origPlay==='function'){
+          w.playCard = function(i, card){
+            if(i===s){ chan.postMessage({type:'PLAY', i, card, sender:clientId}); }
+            return origPlay.apply(this, arguments);
+          };
+        }
+        const origChoose = w.__choose;
+        if(typeof origChoose==='function'){
+          w.__choose = function(name){
+            chan.postMessage({type:'CHOOSE', name, sender:clientId});
+            return origChoose.apply(this, arguments);
+          };
+        }
+        const origStart = w.__start;
+        if(typeof origStart==='function'){
+          w.__start = function(){
+            const r = origStart.apply(this, arguments);
+            setTimeout(()=>{
+              if(parseInt(seatSel.value||'0',10)===0){
+                try{ chan.postMessage({type:'START', state:w.__state, sender:clientId}); }catch(e){}
+              }
+            }, 600);
+            return r;
+          };
+        }
+        status.textContent = 'Injected ✓ (seat '+s+')';
+      }catch(e){
+        status.textContent = 'Inject error: '+e.message;
+      }
+    }
+
+    frame.addEventListener('load', ()=>{
+      // attempt injection when the iframe loads
+      setTimeout(injectWrappers, 200);
+    });
+
+    // initial load
+    load();
+  })();
+  </script>
+</body>
+</html>
