@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Rentz — Local MP Wrapper (v3.1)</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+    #top{position:fixed;left:8px;right:8px;top:8px;display:flex;gap:8px;align-items:center;z-index:5}
+    input,select{background:#0b0b0b;border:1px solid #222;color:#fff;border-radius:10px;padding:8px 10px}
+    button{background:#3b82f6;border:0;color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer}
+    #frame{position:absolute;inset:0;top:56px;border:0;width:100%;height:calc(100% - 56px)}
+    .ghost{background:#1f2937}
+    label{font-size:12px;color:#9ca3af;display:flex;gap:6px;align-items:center}
+    .ok{color:#34d399}.warn{color:#f59e0b}.err{color:#f87171}
+  </style>
+</head>
+<body>
+  <div id="top">
+    <label>Room <input id="room" value="proba" size="8"/></label>
+    <label>Seat
+      <select id="seat"><option>0</option><option>1</option><option>2</option><option>3</option></select>
+    </label>
+    <label>Nume <input id="pname" value="Dan" size="10"/></label>
+    <button id="reload">Load game</button>
+    <a href="index.html" class="ghost" style="text-decoration:none;padding:8px 12px;border-radius:10px">Open index.html</a>
+    <div id="status" style="margin-left:auto;color:#9ca3af">Idle</div>
+  </div>
+  <iframe id="frame" src="index.html"></iframe>
+
+  <script>
+  (function(){
+    const $ = sel => document.querySelector(sel);
+    const room = $('#room'); const seatSel = $('#seat'); const pname = $('#pname'); const status = $('#status'); const frame = $('#frame');
+
+    const load = () => {
+      const r = room.value.trim() || 'proba';
+      const s = parseInt(seatSel.value||'0',10) || 0;
+      const nm = pname.value.trim() || ('Player '+(s+1));
+      localStorage.setItem('rentz_local_room', r);
+      localStorage.setItem('rentz_local_seat', String(s));
+      localStorage.setItem('rentz_local_name', nm);
+      frame.src = 'index.html?seat='+s+'&name='+encodeURIComponent(nm);
+      status.textContent = 'Loading game…';
+    };
+    $('#reload').addEventListener('click', load);
+    room.value = localStorage.getItem('rentz_local_room') || 'proba';
+    seatSel.value = localStorage.getItem('rentz_local_seat') || '0';
+    pname.value = localStorage.getItem('rentz_local_name') || 'Player';
+
+    const channelName = () => 'rentz_'+(room.value.trim()||'proba');
+    let chan = new BroadcastChannel(channelName());
+    let clientId = (Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,10);
+    let pendingSnapshot = null;
+
+    const mySeat = ()=> parseInt(seatSel.value||'0',10)||0;
+    const myName = ()=> pname.value.trim() || ('Player '+(mySeat()+1));
+
+    room.addEventListener('change', ()=>{ try{chan.close();}catch(e){}; chan = new BroadcastChannel(channelName()); bindChan(); });
+
+    function markLocalIsHuman(win){
+      try{
+        const s = mySeat();
+        if(Array.isArray(win.__state?.players)){
+          win.__state.players.forEach((p,i)=>{ p.isHuman = (i===s); });
+        }
+      }catch(e){}
+    }
+
+    function applyNames(win, names){
+      try{
+        if(!Array.isArray(names)) return;
+        if(Array.isArray(win.__state?.players)){
+          for(let i=0;i<Math.min(4, names.length); i++){
+            win.__state.players[i].name = names[i] || win.__state.players[i].name;
+          }
+        }
+      }catch(e){}
+    }
+
+    function collectNames(win){
+      try{
+        if(Array.isArray(win.__state?.players)){
+          return win.__state.players.map(p=> p.name || '');
+        }
+      }catch(e){}
+      return [];
+    }
+
+    function tryApplySnapshot(win, snap, names){
+      try{
+        if(!win || !win.renderHands) return false;
+        win.__state = snap;
+        if(names) applyNames(win, names);
+        markLocalIsHuman(win);
+        win.renderHands();
+        status.textContent = 'Snapshot applied ✓';
+        status.className = 'ok';
+        return true;
+      }catch(e){
+        status.textContent = 'Snapshot error: '+e.message;
+        status.className = 'err';
+        return false;
+      }
+    }
+
+    function applyOrQueue(payload){
+      const win = frame.contentWindow;
+      if(!win){ pendingSnapshot = payload; return; }
+      if(!tryApplySnapshot(win, payload.state, payload.names)){
+        pendingSnapshot = payload;
+      }else{
+        pendingSnapshot = null;
+      }
+    }
+
+    function bindChan(){
+      chan.onmessage = (ev)=>{
+        const d = ev.data||{};
+        if(d.sender===clientId) return;
+        const w = frame.contentWindow;
+        if(d.type==='START'){ applyOrQueue(d); }
+        if(d.type==='PLAY'){ try{ w && w.playCard(d.i, d.card); }catch(e){} }
+        if(d.type==='CHOOSE'){ try{ w && w.__choose(d.name); }catch(e){} }
+        if(d.type==='NAMESYNC'){
+          try{ if(w){ applyNames(w, d.names); w.renderHands && w.renderHands(); } }catch(e){}
+        }
+      };
+    }
+    bindChan();
+
+    function injectWrappers(){
+      try{
+        const w = frame.contentWindow;
+        const s = mySeat();
+
+        // Patch __start: host broadcast snapshot+names; clients init UI but wait for host snapshot
+        const origStart = w.__start;
+        if(typeof origStart==='function'){
+          w.__start = function(){
+            const r = origStart.apply(this, arguments);
+            // ensure our local name is set in state
+            try{ if(w.__state && w.__state.players[s]) w.__state.players[s].name = myName(); }catch(e){}
+            markLocalIsHuman(w);
+            if(s===0){
+              setTimeout(()=>{
+                try{
+                  const names = collectNames(w);
+                  chan.postMessage({type:'START', state:w.__state, names, sender:clientId});
+                  status.textContent = 'Dealt & broadcast ✓';
+                  status.className = 'ok';
+                }catch(e){
+                  status.textContent = 'Broadcast error';
+                  status.className = 'err';
+                }
+              }, 500);
+            }else{
+              status.textContent = 'Waiting for host snapshot…';
+              status.className = 'warn';
+              // also announce our name to everyone; host may rebroadcast the full list later
+              try{ chan.postMessage({type:'NAMESYNC', namesHint:{seat:s, name: myName()}, sender:clientId}); }catch(e){}
+            }
+            return r;
+          };
+        }
+
+        // Host listens for name hints and rebroadcasts a consolidated list
+        chan.onmessage = (ev)=>{
+          const d = ev.data||{}; if(d.sender===clientId) return;
+          if(s===0 && d.type==='NAMESYNC' && d.namesHint){
+            try{
+              const list = collectNames(w);
+              const seat = d.namesHint.seat|0; const nm = (d.namesHint.name||'').toString();
+              if(list[seat]!==nm){ list[seat]=nm; chan.postMessage({type:'NAMESYNC', names: list, sender:clientId}); }
+            }catch(e){}
+          }
+        };
+
+        // Wrap play/choose to broadcast from local seat
+        const origPlay = w.playCard;
+        if(typeof origPlay==='function'){
+          w.playCard = function(i, card){
+            if(i===s){ try{ chan.postMessage({type:'PLAY', i, card, sender:clientId}); }catch(e){} }
+            return origPlay.apply(this, arguments);
+          };
+        }
+        const origChoose = w.__choose;
+        if(typeof origChoose==='function'){
+          w.__choose = function(name){
+            try{ chan.postMessage({type:'CHOOSE', name, sender:clientId}); }catch(e){}
+            return origChoose.apply(this, arguments);
+          };
+        }
+
+        if(pendingSnapshot){ tryApplySnapshot(w, pendingSnapshot.state, pendingSnapshot.names); pendingSnapshot=null; }
+
+        status.textContent = 'Injected ✓ (seat '+s+')';
+        status.className = '';
+      }catch(e){
+        status.textContent = 'Inject error: '+e.message;
+        status.className = 'err';
+      }
+    }
+
+    frame.addEventListener('load', ()=> setTimeout(injectWrappers, 250));
+
+    // initial load
+    load();
+  })();
+  </script>
+</body>
+</html>
