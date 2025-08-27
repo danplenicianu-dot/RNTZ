@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Rentz — Local MP (4 oameni, rotație) — v5</title>
+  <title>Rentz — Local MP (4 oameni, rotație) — v6</title>
   <style>
     html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
     #top{position:fixed;left:8px;right:8px;top:8px;display:flex;gap:8px;align-items:center;z-index:5}
     input,select{background:#0b0b0b;border:1px solid #222;color:#fff;border-radius:10px;padding:8px 10px}
-    button{background:#3b82f6;border:0;color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer}
+    button{background:#3b82f6;border:0;color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer;border-radius:10px}
     #frame{position:absolute;inset:0;top:56px;border:0;width:100%;height:calc(100% - 56px)}
     .ghost{background:#1f2937}
     label{font-size:12px;color:#9ca3af;display:flex;gap:6px;align-items:center}
@@ -23,6 +23,7 @@
     </label>
     <label>Nume <input id="pname" value="Player" size="10"/></label>
     <button id="reload">Load game</button>
+    <button id="forceJoin" class="ghost">Force join</button>
     <a href="index.html" class="ghost" style="text-decoration:none;padding:8px 12px;border-radius:10px">Open index.html</a>
     <div id="status" style="margin-left:auto;color:#9ca3af">Idle</div>
   </div>
@@ -68,21 +69,33 @@
         if(Array.isArray(win.__state?.players)){
           win.__state.players.forEach((p,i)=>{ p.isHuman = (i===s); p.isBot=false; });
           if(win.__state.players[s]) win.__state.players[s].name = myName();
+          // dacă există câmpuri tipice, setează starea ca „în joc”
+          if(win.__state.gameStarted !== undefined) win.__state.gameStarted = true;
+          if(win.__state.phase && /lobby|start/i.test(win.__state.phase)) win.__state.phase = 'playing';
         }
+      }catch(e){}
+    }
+
+    // close any lobby modal or overlay
+    function closeLobby(win){
+      try{
+        const doc = win.document;
+        const modals = Array.from(doc.querySelectorAll('div,section,dialog,form')).filter(el=>/(rentz\s*&\s*trick\-taking|start joc|numele tău)/i.test(el.textContent||''));
+        modals.forEach(el=> el.style.display='none');
       }catch(e){}
     }
 
     function guardChooseOverlay(win, enabled){
       try{
         const doc = win.document;
-        const modals = Array.from(doc.querySelectorAll('div,section,dialog')).filter(el=>/(alege jocul|rentz & trick-taking|rentz)/i.test(el.textContent||''));
+        const modals = Array.from(doc.querySelectorAll('div,section,dialog')).filter(el=>/(alege jocul)/i.test(el.textContent||''));
         modals.forEach(el=>{ el.style.pointerEvents = enabled ? 'auto' : 'none'; el.style.opacity = enabled ? '' : '0.85'; });
       }catch(e){}
     }
     function closeChooseOverlay(win){
       try{
         const doc = win.document;
-        const modals = Array.from(doc.querySelectorAll('div,section,dialog')).filter(el=>/(alege jocul|rentz & trick-taking|rentz)/i.test(el.textContent||''));
+        const modals = Array.from(doc.querySelectorAll('div,section,dialog')).filter(el=>/(alege jocul)/i.test(el.textContent||''));
         modals.forEach(el=> el.style.display='none');
       }catch(e){}
     }
@@ -110,15 +123,20 @@
       }catch(e){}
     }
 
+    function makePlayable(win){
+      ensureLocalSeatVisible(win);
+      closeLobby(win);
+      guardChooseOverlay(win, mySeat()===chooser);
+      if(typeof win.renderHands==='function') win.renderHands();
+    }
+
     function tryApply(win, payload){
       if(!win || !win.renderHands) return false;
       try{
         win.__state = payload.state;
         applyNames(win, payload.names||[]);
-        ensureLocalSeatVisible(win);
-        win.renderHands();
         chooser = (payload.chooser|0)||0;
-        guardChooseOverlay(win, mySeat()===chooser);
+        makePlayable(win);
         status.textContent = 'Snapshot applied ✓ (chooser='+chooser+')';
         status.className = 'ok';
         return true;
@@ -141,12 +159,11 @@
         if(d.sender===clientId) return;
         const w = frame.contentWindow;
         if(d.type==='READY' && amHost && w){
-          // client cere snapshot -> trimite imediat
           sendSnapshot(w, 'on READY');
         }
         if(d.type==='START'){ applyOrQueue(d); }
         if(d.type==='NAMESYNC'){
-          try{ if(w){ applyNames(w, d.names); w.renderHands && w.renderHands(); } }catch(e){}
+          try{ if(w){ applyNames(w, d.names); makePlayable(w); } }catch(e){}
         }
         if(d.type==='CHOOSE'){
           try{
@@ -184,25 +201,24 @@
         if(typeof origStart==='function'){
           w.__start = function(){
             const r = origStart.apply(this, arguments);
-            ensureLocalSeatVisible(w);
-            guardChooseOverlay(w, s===chooser);
+            makePlayable(w);
             if(amHost){
               chooser = 0;
-              // trimite snapshot de mai multe ori, ca sigur ajunge
+              // burst snapshot
               let count = 0;
               const t = setInterval(()=>{
                 sendSnapshot(w, 'burst '+(++count));
                 if(count>=5) clearInterval(t);
-              }, 350);
+              }, 300);
               status.textContent = 'Dealt & broadcast ✓';
               status.className = 'ok';
             }else{
               status.textContent = 'Waiting for host snapshot…';
               status.className = 'warn';
-              // anunță hostul că e pregătit
+              // semnal că e pregătit + nume
+              const sData = { seat:s, name: myName() };
               chan.postMessage({type:'READY', sender:clientId, seat:s});
-              // trimite și numele pentru consolidare
-              chan.postMessage({type:'NAMESYNC_HINT', hint:{seat:s, name: myName()}, sender:clientId});
+              chan.postMessage({type:'NAMESYNC_HINT', hint:sData, sender:clientId});
             }
             return r;
           };
@@ -223,7 +239,7 @@
           }
         };
 
-        // PLAY: doar local seat, sau remote
+        // PLAY: doar local seat (sau remote)
         const origPlay = w.playCard;
         if(typeof origPlay==='function'){
           w.playCard = function(i, card){
@@ -236,7 +252,7 @@
           };
         }
 
-        // CHOOSE: doar chooser local; broadcast + nextChooser
+        // CHOOSE: doar chooser local
         const origChoose = w.__choose;
         if(typeof origChoose==='function'){
           w.__choose = function(name){
@@ -256,8 +272,16 @@
 
         status.textContent = 'Injected ✓ (seat '+s+', chooser='+chooser+', host='+amHost+')';
         status.className = '';
-        // clienții care intră după START cer snapshot
-        if(!amHost){ chan.postMessage({type:'READY', sender:clientId, seat:s}); }
+
+        // Clienții care intră după start cer snapshot periodic până primesc
+        if(!amHost){
+          let tries = 0;
+          const rq = setInterval(()=>{
+            chan.postMessage({type:'READY', sender:clientId, seat:s});
+            tries++;
+            if(pending===null || tries>10) clearInterval(rq);
+          }, 500);
+        }
       }catch(e){
         status.textContent = 'Inject error: '+e.message;
         status.className = 'err';
@@ -265,6 +289,7 @@
     }
 
     frame.addEventListener('load', ()=> setTimeout(inject, 250));
+    $('#forceJoin').addEventListener('click', ()=>{ const w = frame.contentWindow; if(w){ makePlayable(w); status.textContent='Forced join'; status.className='ok'; } });
     // initial load
     (function initial(){ const r = room.value.trim()||'proba'; const s = mySeat(); const nm = myName();
       frame.src = 'index.html?seat='+s+'&name='+encodeURIComponent(nm);
